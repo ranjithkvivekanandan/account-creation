@@ -40,7 +40,8 @@ phases:
       - echo "Zipping AccountCreationNotifierLambdahandler.py to account-creation-notifier.zip"
       - zip -j account-creation-notifier.zip ./src/AccountCreationNotifierLambdahandler.py
       - ls
-      - aws cloudformation package --template-file ./src/AccountCreation.yaml --s3-bucket $BUILD_OUTPUT_BUCKET --s3-prefix $BUILD_OUTPUT_S3_PREFIX --kms-key-id $KMSKey --output-template-file AccountCreation.yaml --force-upload
+      - echo "$BUILD_OUTPUT_BUCKET- $BUILD_OUTPUT_S3_PREFIX"
+      - aws cloudformation package --template-file ./src/AccountCreation.yaml --s3-bucket $BUILD_OUTPUT_BUCKET --s3-prefix $BUILD_OUTPUT_S3_PREFIX --output-template-file AccountCreation.yaml --force-upload
   post_build:
     commands:
       - echo "Finished building the package"
