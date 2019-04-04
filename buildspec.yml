@@ -1,0 +1,50 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "Running pre-build installs"
+      - apt-get update
+      - apt-get install zip 
+  pre_build:
+    commands:
+      - echo "Started building the package"
+  build:
+    commands:
+      - echo "Zipping EmailVerificationActivityPoller.py to email-verification-activity-poller.zip"
+      - zip -j email-verification-activity-poller.zip ./src/EmailVerificationActivityPoller.py
+      - echo "Zipping ApprovalActivityPoller.py to approval-activity-poller.zip"
+      - zip -j approval-activity-poller.zip ./src/ApprovalActivityPoller.py  
+      - echo "Zipping ApprovalActivityWorker.py to approval-activity-worker.zip"
+      - zip -j approval-activity-worker.zip ./src/ApprovalActivityWorker.py  
+      - echo "Zipping AccountCreatorLambdaHandler.py to account-creation.zip"
+      - zip -j account-creation.zip ./src/AccountCreatorLambdaHandler.py  
+      - echo "Zipping BucketPolicyUpdaterLambdaHandler.py to policy-updater.zip"
+      - zip -j policy-updater.zip ./src/BucketPolicyUpdaterLambdaHandler.py
+      - echo "Zipping ProvisionLogPipelineLambdaHandler.py to log-pipeline-creator.zip"
+      - zip -j log-pipeline-creator.zip ./src/ProvisionLogPipelineLambdaHandler.py
+      - echo "Zipping AccountOnboardingLambdaHandler.py to account-onboarding.zip"
+      - zip -j account-onboarding.zip ./src/AccountOnboardingLambdaHandler.py
+      - echo "Zipping DefaultRegionOnboardingLambdaHandler.py to default-region-onboarding.zip"
+      - zip -j default-region-onboarding.zip ./src/DefaultRegionOnboardingLambdaHandler.py
+      - echo "Zipping RegionOnboardingLambdaHandler.py to region-onboarding.zip"
+      - zip -j region-onboarding.zip ./src/RegionOnboardingLambdaHandler.py
+      - cd src/landingzone
+      - echo "Zipping dependecies for VPCCreationLambdaHandler.py to vpc-creation.zip"
+      - zip -r ../../vpc-creation.zip ../VPCCreationLambdaHandler.py *
+      - echo "Zipping dependecies for DefaultVPCDeletionLambdaHandler.py to vpc-deletion.zip"
+      - zip -r ../../vpc-deletion.zip ../DefaultVPCDeletionLambdaHandler.py *
+      - cd ../..
+      - echo "Zipping AccountCreationNotifierLambdahandler.py to account-creation-notifier.zip"
+      - zip -j account-creation-notifier.zip ./src/AccountCreationNotifierLambdahandler.py
+      - ls
+      - aws cloudformation package --template-file ./src/AccountCreation.yaml --s3-bucket $BUILD_OUTPUT_BUCKET --s3-prefix $BUILD_OUTPUT_S3_PREFIX --kms-key-id $KMSKey --output-template-file AccountCreation.yaml --force-upload
+  post_build:
+    commands:
+      - echo "Finished building the package"
+artifacts:
+  files:
+    - AccountCreation.yaml
+    - ./src/AccountCreationTestStageConfig.json
+    - ./src/AccountCreationProdStageConfig.json
+  discard-paths: yes
+

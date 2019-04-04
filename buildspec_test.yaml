@@ -1,0 +1,17 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "Running pre-build installs"
+      - apt-get update
+  pre_build:
+    commands:
+      - echo "Started building the package"
+      - pip install -r requirements.txt
+  build:
+    commands:
+      - ls
+      - python ./test/feature_test_cases.py
+  post_build:
+    commands:
+      - echo "Finished building the package"

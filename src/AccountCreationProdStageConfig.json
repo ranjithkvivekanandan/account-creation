@@ -1,0 +1,19 @@
+{
+	"Parameters" : {
+		"DeploymentStage":"prod",
+		"ToolsArtifactsS3Bucket": "accountcreationcodepipelineartifactbucke-s3bucket-1vdnd6zu16ecx",
+		"LogPipelineCFTVersion": "v7",
+		"AccountOnboardingCFTVersion": "v106",
+		"RegionOnboardingCFTVersion":"v11",
+		"CommonTemplateVersion":"v1",
+		"CostCenter":"NA",
+		"LoggingAccountId":"876837051053",
+		"LoggingAccountTrustRoleArn": "arn:aws:iam::876837051053:role/pac-devops-role",
+		"MasterAccountRoleArn": "arn:aws:iam::957877769437:role/pac-org-admin",
+		"MasterAccountRoleExternalId": "739778925696",
+		"AccountCreationNotificationEmail": "c6875215.panacorp.onmicrosoft.com@amer.teams.ms",
+		"AccountCreationApproverEmail": "Alex.Moshkovich@panasonic.aero",
+		"AccountCreationFromEmail":"cloudsupport@panasonic.aero",
+		"AllowAWSAccountCreation":"true"
+	}
+}

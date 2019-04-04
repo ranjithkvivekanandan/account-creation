@@ -1,0 +1,1639 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cloud formation template for automation AWS account creation and bootstraping with mandatory Services like CT,Config,etc
+Parameters:
+  DeploymentStage:
+    Type: String
+    Default: SB
+    AllowedValues:
+      - SB
+      - PROD
+      - DEV
+  ToolsArtifactsS3Bucket:
+    Description: Devops artifacts S3 Bucket
+    Type: String
+    Default: accountcreationartifact
+  LogPipelineCFTVersion:
+    Description: Version Log pipeline creation CFT
+    Type: String
+    Default: v1
+  AccountOnboardingCFTVersion:
+    Description: Version account onboarding CFT
+    Type: String
+    Default: v1
+  RegionOnboardingCFTVersion:
+    Description: Version of the region onboarding CFT
+    Type: String
+  CostCenter:
+    Description: Default Cost center for cloud shell
+    Type: String
+  LoggingAccountId:
+    Description: AWS AccountId of logging Account
+    Type: String
+  CommonTemplateVersion:
+    Description: Version of the common CFT
+    Type: String
+  LoggingAccountTrustRoleArn:
+    Description: Role ARN of logging account
+    Type: String
+    Default: arn:aws:iam::87653:role/pac-devops-role
+  MasterAccountRoleArn:
+    Description: Role ARN for master account
+    Type: String
+    Default: arn:aws:iam::112367:role/PacMasterRole
+  MasterAccountRoleExternalId:
+    Description: External id for the master account role
+    Type: String
+    Default: 1234
+  AccountCreationNotificationEmail:
+    Type: String
+    Description: Enter notification email
+    Default: r@life360.com
+  AccountCreationApproverEmail:
+    Type: String
+    Description: Enter approvar email
+    Default: r@life360.com
+  AccountCreationFromEmail:
+    Type: String
+    Description: Enter from email for sending approval/verification emails
+    Default: r@life360.com
+  AllowAWSAccountCreation:
+    Type: String
+    Description: Flag for allowing new account creation or Mocking.
+    Default: false
+    AllowedValues: [true, false]
+  TestAccountId:
+    Type: String
+    Description: Test AWS Account to Mock the account creation. Used in Account creation Step.
+    Default: 2087
+Conditions:
+  IsSig2S3Url:
+    Fn::Equals:
+      - Ref: AWS::Region
+      - us-east-1
+Resources:
+  AccountOnboardingStackset:  
+    Type: Custom::StackSet
+    Properties:
+      ServiceToken:
+        Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:stackset-updater
+      StackSetName:
+        Fn::Sub: ${DeploymentStage}-account-onboarding
+      Description: "Account Onboarding PAC with IAM Roles,CT and Conifg"
+      DeploymentRegions:
+        Ref: AWS::Region
+      BucketName: !Ref ToolsArtifactsS3Bucket
+      BucketKey:
+        Fn::Sub: account-onboarding/${AccountOnboardingCFTVersion}/account-onboarding.yaml
+      TemplateURL:
+        Fn::Sub: https://s3-${AWS::Region}.amazonaws.com/${ToolsArtifactsS3Bucket}/account-onboarding/${AccountOnboardingCFTVersion}/account-onboarding.yaml
+  RegionOnboardingStackset:
+    Type: Custom::StackSet
+    Properties:
+      ServiceToken:
+        Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:stackset-updater
+      StackSetName:
+        Fn::Sub: ${DeploymentStage}-region-onboarding
+      Description: "Region Onboarding PAC with IAM Roles,CT and Conifg"
+      DeploymentRegions:
+        Ref: AWS::Region
+      BucketName: !Ref ToolsArtifactsS3Bucket
+      BucketKey:
+        Fn::Sub: region-onboarding/${RegionOnboardingCFTVersion}/region-master.yaml
+      TemplateURL:
+        Fn::Sub: https://s3-${AWS::Region}.amazonaws.com/${ToolsArtifactsS3Bucket}/region-onboarding/${RegionOnboardingCFTVersion}/region-master.yaml
+      Params:
+        CostCenter:
+          Ref: CostCenter
+        LoggingAccountId:
+          Ref: LoggingAccountId
+        CommonTemplateVersion:
+          Ref: CommonTemplateVersion
+        DevOpsAccountId:
+          Ref: AWS::AccountId
+        DevopsArtifactsBucket:
+          Ref: ToolsArtifactsS3Bucket
+        TemplateVersion:
+          Ref: RegionOnboardingCFTVersion
+        DeploymentStage:
+          Ref: DeploymentStage
+  VPCStackset:
+    Type: Custom::StackSet
+    Properties:
+      ServiceToken:
+        Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:stackset-updater
+      StackSetName:
+        Fn::Sub: ${DeploymentStage}-region-vpc
+      Description: "PAC Regional VPC"
+      BucketName: !Ref ToolsArtifactsS3Bucket
+      BucketKey:
+        Fn::Sub: region-onboarding/${RegionOnboardingCFTVersion}/region-vpc.yaml
+      TemplateURL:
+        Fn::Sub: https://s3-${AWS::Region}.amazonaws.com/${ToolsArtifactsS3Bucket}/region-onboarding/${RegionOnboardingCFTVersion}/region-vpc.yaml
+      Params:
+        AvailabilityZones: us-west-2a
+  AccountCreationStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName:
+        Fn::Sub: ${DeploymentStage}-AWSAccountCreationStateMachine
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "EmailVerification",
+            "States": {
+              "EmailVerification": {
+                "Type": "Task",
+                "Resource": "${EmailVerificationActivity}",
+                "TimeoutSeconds": 3600,
+                "Next": "Approval"
+              },
+              "Approval": {
+                "Type": "Task",
+                "Resource": "${ApprovalActivity}",
+                "TimeoutSeconds": 3600,
+                "Next": "CreateAccount"
+              },
+              "CreateAccount": {
+                "Type": "Task",
+                "Resource": "${AccountCreationLambda.Arn}",
+                "Next": "ProvisionLogPipeline"
+              },
+              "ProvisionLogPipeline": {
+                "Type": "Task",
+                "Resource": "${LogPipelineCreatorLambda.Arn}",
+                "Next": "AccountBootstrapping"
+              },
+              "AccountBootstrapping": {
+                "Type": "Task",
+                "Resource": "${AccountOnboardingLambda.Arn}",
+                "Next": "DefaultRegionOnboarding"
+              },
+              "DefaultRegionOnboarding": {
+                "Type": "Task",
+                "Resource": "${DefaultRegionOnboardingLambda.Arn}",
+                "Next": "StoreAndSendAccountCreationNotification"
+              },
+              "StoreAndSendAccountCreationNotification": {
+                "Type": "Task",
+                "Resource": "${AccountCreationNotifierLambda.Arn}",
+                "End": true
+              }
+            }
+          }
+      RoleArn:
+        Fn::GetAtt: StepFunctionExecutionRole.Arn
+  ApprovalActivity:
+    Type: "AWS::StepFunctions::Activity"
+    Properties: 
+      Name:
+        Fn::Sub: ${DeploymentStage}-approval
+  EmailVerificationActivity:
+    Type: "AWS::StepFunctions::Activity"
+    Properties:
+      Name:
+        Fn::Sub: ${DeploymentStage}-emailVerfication
+  AccountCreationAPI:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Body:
+        Fn::Sub: |
+          {
+             "swagger":"2.0",
+             "info":{
+                "version":"2018-04-16T21:50:16Z",
+                "title":"AWSAccount"
+             },
+             "host":"wdxqk8vgb5.execute-api.us-west-2.amazonaws.com",
+             "basePath":"/dev",
+             "schemes":[
+                "https"
+             ],
+             "paths":{
+                "/account":{
+                   "post":{
+                      "consumes":[
+                         "application/json"
+                      ],
+                      "produces":[
+                         "application/json"
+                      ],
+                      "parameters": [
+                        {
+                          "in": "body",
+                          "name": "accountcreation",
+                          "required": true,
+                          "schema": {
+                            "$ref": "#/definitions/accountcreation"
+                          }
+                        }
+                      ],
+                      "responses":{
+                         "200":{
+                            "description":"200 response",
+                            "schema":{
+                               "$ref":"#/definitions/Empty"
+                            }
+                         }
+                      },
+                      "security":[
+                         {
+                            "api_key":[
+          
+                            ]
+                         }
+                      ],
+                      "x-amazon-apigateway-integration":{
+                         "credentials":"${StepFunctionExecutionRole.Arn}",
+                         "uri":"arn:aws:apigateway:${AWS::Region}:states:action/StartExecution",
+                         "responses":{
+                            "default":{
+                               "statusCode":"200"
+                            }
+                         },
+                         "requestTemplates":{
+                            "application/json":"##  See http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html\n##  This template will pass through all parameters including path, querystring, header, stage variables, and context through to the integration endpoint via the body/payload\n#set($allParams = $input.params())\n{\n\"name\" : \"$context.requestId\",\n    \"input\": \"$util.escapeJavaScript($input.json('$'))\",\n    \"stateMachineArn\": \"$util.escapeJavaScript($stageVariables.statemachineArn)\"\n}\n"
+                         },
+                         "passthroughBehavior":"when_no_match",
+                         "httpMethod":"POST",
+                         "type":"aws"
+                      }
+                   }
+                },
+                "/account-onboarding": {
+                  "post": {
+                      "consumes": [
+                        "application/json"
+                      ],
+                      "produces": [
+                        "application/json"
+                      ],
+                      "parameters": [
+                        {
+                          "in": "body",
+                          "name": "accountonboarding",
+                          "required": true,
+                          "schema": {
+                            "$ref": "#/definitions/accountonboarding"
+                          }
+                        }
+                      ],
+                      "responses": {
+                          "200": {
+                              "description": "200 response",
+                              "schema": {
+                                  "$ref": "#/definitions/Empty"
+                              }
+                          }
+                      },
+                      "x-amazon-apigateway-integration": {
+                          "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-account-onboarding/invocations",
+                          "responses": {
+                              "default": {
+                                  "statusCode": "200"
+                              }
+                          },
+                          "passthroughBehavior": "when_no_match",
+                          "httpMethod": "POST",
+                          "contentHandling": "CONVERT_TO_TEXT",
+                          "type": "aws"
+                      }
+                  }
+                },
+                "/approve": {
+                  "get": {
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "name": "params",
+                        "in": "query",
+                        "required": true,
+                        "type": "string"
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-approval-actvity-worker/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws_proxy"
+                    }
+                  }
+                },
+                "/budget-creation": {
+                  "post": {
+                    "consumes": [
+                      "application/json"
+                    ],
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "in": "body",
+                        "name": "billingbudget",
+                        "required": true,
+                        "schema": {
+                          "$ref": "#/definitions/billingbudget"
+                        }
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-budget-billing-enabler/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws"
+                    }
+                  }
+                },
+                "/billing-invoice": {
+                  "post": {
+                    "consumes": [
+                      "application/json"
+                    ],
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "in": "body",
+                        "name": "invoicegeneration",
+                        "required": true,
+                        "schema": {
+                          "$ref": "#/definitions/invoicegeneration"
+                        }
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-billing-invoice-generator/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws"
+                    }
+                  }
+                },
+                "/region": {
+                  "post": {
+                    "consumes": [
+                      "application/json"
+                    ],
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "in": "body",
+                        "name": "region",
+                        "required": true,
+                        "schema": {
+                          "$ref": "#/definitions/region"
+                        }
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "security":[
+                       {
+                          "api_key":[
+          
+                          ]
+                       }
+                    ],
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-region-onboarding/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws_proxy"
+                    }
+                  }
+                },
+                "/servicecatalog": {
+                  "post": {
+                    "consumes": [
+                      "application/json"
+                    ],
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "in": "body",
+                        "name": "servicecatalog",
+                        "required": true,
+                        "schema": {
+                          "$ref": "#/definitions/servicecatalog"
+                        }
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-servicecatalog-deployer/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws"
+                    }
+                  }
+                },
+                "/directconnect": {
+                  "post": {
+                    "consumes": [
+                      "application/json"
+                    ],
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "in": "body",
+                        "name": "directconnect",
+                        "required": true,
+                        "schema": {
+                          "$ref": "#/definitions/directconnect"
+                        }
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-cloudshell-direct-connect-apigateway-mgr/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws"
+                    }
+                  }
+                },
+                "/region/vpc": {
+                  "post": {
+                    "consumes": [
+                      "application/json"
+                    ],
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "in": "body",
+                        "name": "vpccreate",
+                        "required": true,
+                        "schema": {
+                          "$ref": "#/definitions/vpccreate"
+                        }
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "security":[
+                       {
+                          "api_key":[
+          
+                          ]
+                       }
+                    ],
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-vpc-creation/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws"
+                    }
+                  }
+                },
+                "/reject": {
+                  "get": {
+                    "produces": [
+                      "application/json"
+                    ],
+                    "parameters": [
+                      {
+                        "name": "params",
+                        "in": "query",
+                        "required": true,
+                        "type": "string"
+                      }
+                    ],
+                    "responses": {
+                      "200": {
+                        "description": "200 response",
+                        "schema": {
+                          "$ref": "#/definitions/Empty"
+                        }
+                      }
+                    },
+                    "x-amazon-apigateway-request-validator": "Validate query string parameters and headers",
+                    "x-amazon-apigateway-integration": {
+                      "uri": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-approval-actvity-worker/invocations",
+                      "responses": {
+                        "default": {
+                          "statusCode": "200"
+                        }
+                      },
+                      "passthroughBehavior": "when_no_match",
+                      "httpMethod": "POST",
+                      "contentHandling": "CONVERT_TO_TEXT",
+                      "type": "aws_proxy"
+                    }
+                  }
+                }
+             },
+             "securityDefinitions":{
+                "api_key":{
+                   "type":"apiKey",
+                   "name":"x-api-key",
+                   "in":"header"
+                }
+             },
+             "definitions": {
+              "Empty": {
+                "type": "object",
+                "title": "Empty Schema"
+              },
+              "servicecatalog": {
+                "type": "object",
+                "properties":{
+                  "params":{
+                    "type": "object",
+                    "properties": {
+                      "PortfolioName": {
+                        "type": "string"
+                      },
+                      "OwnerName": {
+                        "type": "string"
+                      },
+                      "PortfolioDecription": {
+                        "type": "string"
+                      },
+                      "AccountList": {
+                        "type": "string"
+                      },
+                      "ServiceCatalogMasterAccountId": {
+                        "type": "string"
+                      },
+                      "RoleName": {
+                        "type": "string"
+                      }  
+                    }
+                  },
+                  "Region": {
+                    "type": "string"
+                  },
+                  "Action": {
+                    "type": "string"
+                  }
+                }
+              },
+              "vpccreate": {
+                "type": "object",
+                "properties": {
+                  "accountId": {
+                    "type": "string"
+                  },
+                  "region": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string"
+                  },
+                  "vpcProperties": {
+                    "type": "object",
+                    "properties": {
+                      "VPCCidr": {
+                        "type": "string"
+                      },
+                      "Type": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              "billingbudget": {
+                "type": "object",
+                "properties": {
+                  "accountId": {
+                    "type": "string"
+                  },
+                  "accountName": {
+                    "type": "string"
+                  },
+                  "budgetAmount": {
+                    "type": "string"
+                  },
+                  "emailID": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string"
+                  }
+                }
+              },
+              "accountonboarding": {
+                "type": "object",
+                "properties": {
+                  "accountId": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string"
+                  },
+                  "futures": {
+                    "type": "object",
+                    "properties": {
+                      "account_onboarding": {
+                        "type": "object",
+                        "properties": {
+                          "CloudPioneerRole": {
+                            "type": "boolean",
+                            "default": false
+                          },
+                          "IOTPioneerRole": {
+                            "type": "boolean",
+                            "default": false
+                          },
+                          "DataLakePioneerRole": {
+                            "type": "boolean",
+                            "default": false
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "region": {
+                "type": "object",
+                "properties": {
+                  "accountId": {
+                    "type": "string"
+                  },
+                  "region": {
+                    "type": "string"
+                  }
+                }
+              },
+              "directconnect":{
+                "type": "object",
+                "properties": {
+                  "Action" : {
+                    "type": "string"
+                  },
+                  "DirectConnectSubnetCIDR": {
+                    "type": "string"
+                  },
+                  "DirectConnectVpcID": {
+                    "type": "string"
+                  },
+                  "DirectConnectGatewayASN": {
+                    "type": "string"
+                  },
+                  "DirectConnectVIFVLAN": {
+                    "type": "string"
+                  },
+                  "DirectConnectVIFASN": {
+                    "type": "string"
+                  },
+                  "TargetAccountNumber": {
+                    "type": "string"
+                  },
+                  "TargetAccountRegion": {
+                    "type": "string"
+                  }
+                }
+              },
+              "accountcreation": {
+                "type": "object",
+                "properties": {
+                  "emailId": {
+                    "type": "string"
+                  },
+                  "accountName": {
+                    "type": "string"
+                  },
+                  "notificationEmail": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "invoicegeneration": {
+                "type": "object",
+                "properties": {
+                  "accountId": {
+                    "type": "string"
+                  },
+                  "fromDate": {
+                    "type": "string"
+                  },
+                  "toDate": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+      Description: "AWS Account Creation API"
+      Name: "AWSAccount"
+  APIDeployment3:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId:
+        Ref: AccountCreationAPI
+      Description: !Sub '${AccountCreationAPI} ${DeploymentStage} deployment'
+  APIStage:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      StageName: !Ref DeploymentStage
+      Description: Deployment Stage
+      RestApiId: !Ref AccountCreationAPI
+      DeploymentId: !Ref APIDeployment3
+      Variables:
+        statemachineArn:
+          Ref: AccountCreationStateMachine
+        targetUri:
+          Fn::Sub: "arn:aws:apigateway:${AWS::Region}:states:action/StartExecution"
+        targetRole:
+          Fn::GetAtt: StepFunctionExecutionRole.Arn
+  ApiKey:
+    Type: "AWS::ApiGateway::ApiKey"
+    DependsOn:
+      - "APIDeployment3"
+      - "APIStage"
+    Properties:
+      Description: "API Key for Account Cretaion API"
+      Enabled: "true"
+      GenerateDistinctId: "false"
+      StageKeys:
+        - RestApiId:
+            Ref: AccountCreationAPI
+          StageName:
+            Ref: APIStage
+  APIUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      ApiStages:
+      - ApiId: !Ref AccountCreationAPI
+        Stage: !Ref APIStage
+      Description: Account Creation api usage plan
+      Quota:
+        Limit: 5000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 200
+        RateLimit: 100
+      UsagePlanName: Plan_1
+  APIUsagePlanKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    Properties :
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref APIUsagePlan
+  StepFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaFullAccess
+        - arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Policies:
+        -
+          PolicyName:
+            Fn::Sub: ${DeploymentStage}-AccountCreationPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*"
+  EmailVerificationActivityPollerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../email-verification-activity-poller.zip
+      Description: Lambda handler for polling approval activities
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-email-verification-activity-poller
+      Handler:
+        Fn::Sub: EmailVerificationActivityPoller.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: ApprovalActivityPollerLambdaRole.Arn
+      Runtime: python2.7
+      Timeout: 60
+      Environment:
+        Variables:
+          FROM_EMAIL:
+            Ref: AccountCreationFromEmail
+          EMAIL_VERIFICATION_ACTIVITY:
+            Ref: EmailVerificationActivity
+          APPROVAL_API:
+            Fn::Sub: https://${AccountCreationAPI}.execute-api.${AWS::Region}.amazonaws.com/${APIStage}
+  ApprovalActivityPollerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../approval-activity-poller.zip
+      Description: Lambda handler for polling approval activities
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-approval-activity-poller
+      Handler:
+        Fn::Sub: ApprovalActivityPoller.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: ApprovalActivityPollerLambdaRole.Arn
+      Runtime: python2.7
+      Timeout: 60
+      Environment:
+        Variables:
+          FROM_EMAIL:
+            Ref: AccountCreationFromEmail
+          APPROVAR_EMAIL:
+            Ref: AccountCreationApproverEmail
+          APPROVAL_ACTIVITY:
+            Ref: ApprovalActivity
+          APPROVAL_API:
+            Fn::Sub: https://${AccountCreationAPI}.execute-api.${AWS::Region}.amazonaws.com/${APIStage}
+  ApprovalActivityPollerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName:
+            Fn::Sub: ${DeploymentStage}-ApprovalPollingPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - states:GetActivityTask
+                  - states:*
+                  - ses:SendEmail
+                Resource: "*"
+  ApprovalActivityWorkerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../approval-activity-worker.zip
+      Description: Lambda handler for apprvoing or rejecting requests
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-approval-actvity-worker
+      Handler:
+        Fn::Sub: ApprovalActivityWorker.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: ApprovalActivityWorkerLambdaRole.Arn
+      Runtime: python2.7
+      Timeout: 60
+  ApprovalActivityWorkerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName:
+            Fn::Sub: ${DeploymentStage}-ApprovalPollingPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - states:GetActivityTask
+                  - states:*
+                  - ses:SendEmail
+                Resource: "*"
+  ApprovalActivityWorkerInvokePermission: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Fn::GetAtt: ApprovalActivityWorkerLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: 
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+  ApprovalActivityScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: ApprovalActivityScheduledRule
+      ScheduleExpression: rate(1 minute)
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - ApprovalActivityPollerLambda
+              - Arn
+          Id: SendApprovalNotice
+        -
+          Arn:
+            Fn::GetAtt:
+              - EmailVerificationActivityPollerLambda
+              - Arn
+          Id: SendVerificationEmail
+  EmailverificationActivityPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt: EmailVerificationActivityPollerLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - ApprovalActivityScheduledRule
+          - Arn
+  ApprovalActivityPermission: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Fn::GetAtt: ApprovalActivityPollerLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: 
+        Fn::GetAtt: 
+          - ApprovalActivityScheduledRule
+          - Arn
+  AccountCreationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../account-creation.zip
+      Description: Lambda handler for creating AWS accounts
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-account-creation
+      Handler:
+        Fn::Sub: AccountCreatorLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: AccountCreationLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          MASTER_ACCOUNT_EXTERNAL_ID:
+            Ref: MasterAccountRoleExternalId
+          MASTER_ACCOUNT_ROLE_ARN:
+            Ref: MasterAccountRoleArn
+          ALLOW_ACCOUNT_CREATION:
+            Ref: AllowAWSAccountCreation
+          TEST_ACCOUNT_ID:
+            Ref: TestAccountId
+  AccountCreationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: AccountCreationPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*"
+  BukectPolicyUpdaterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../policy-updater.zip
+      Description: Lambda handler for allowing access to devops artifacts
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-devops-artifacts-policy-updater
+      Handler:
+        Fn::Sub: BucketPolicyUpdaterLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: BucketPolicyUpdaterLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          DEVOPS_ARTIFACT_BUCKET:
+            Ref: ToolsArtifactsS3Bucket
+  BucketPolicyUpdaterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: AccountCreationPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                Resource: "*"
+  LogPipelineCreatorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../log-pipeline-creator.zip
+      Description: Lambda handler whih creates logs bucket and log pipeline via cloud formation
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-log-pipeline-creator
+      Handler:
+        Fn::Sub: ProvisionLogPipelineLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: LogPipelineCreatorLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          DEVOPS_ARTIFACT_BUCKET:
+            Ref: ToolsArtifactsS3Bucket
+          LOGGING_ACCOUNT_TRUST_ROLE:
+            Ref: LoggingAccountTrustRoleArn
+          LOG_PIPELINE_CREATION_CFT_LOCATION:
+            Fn::Sub: "https://s3.amazonaws.com/${ToolsArtifactsS3Bucket}/log-pipeline/${LogPipelineCFTVersion}/log-pipeline-master.yaml"
+          LOG_PIPELINE_CREATION_CFT_VERSION:
+            Ref: LogPipelineCFTVersion
+  LogPipelineCreatorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: AccountCreationPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*"
+  AccountOnboardingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../account-onboarding.zip
+      Description: Lambda handler which enables CT,Config via cloud formation
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-account-onboarding
+      Handler:
+        Fn::Sub: AccountOnboardingLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: AccountOnboardingLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          ACCOUNT_ONBOARDING_REGION:
+            Ref: AWS::Region
+          ACCOUNT_ONBOARDING_STACKSET:
+            Ref: AccountOnboardingStackset
+          ACCOUNTS_TABLE:
+            Ref: AccountsTable
+          DELETE_VPC_FUNCTION:
+            Fn::Sub: "${DeploymentStage}-pac-default-vpc-deletion"
+  AccountOnboardingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: AccountCreationPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - cloudformation:*
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                  - lambda:InvokeFunction
+                Resource: "*"
+  DefaultRegionOnboardingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../default-region-onboarding.zip
+      Description: Lambda handler which onbaorfds default region
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-default-region-onboarding
+      Handler:
+        Fn::Sub: DefaultRegionOnboardingLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: DefaultRegionOnboardingLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION_ONBOARDING_STACKSET:
+            Ref: RegionOnboardingStackset
+  DefaultRegionOnboardingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: RegionOnboardingPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - cloudformation:*
+                Resource: "*"
+  RegionOnboardingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../region-onboarding.zip
+      Description: Lambda handler which onboards region
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-region-onboarding
+      Handler:
+        Fn::Sub: RegionOnboardingLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: RegionOnboardingLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION_ONBOARDING_STACKSET:
+            Ref: RegionOnboardingStackset
+          LOGGING_ACCOUNT_TRUST_ROLE:
+            Ref: LoggingAccountTrustRoleArn
+          LOG_DESTINATION_CFT_LOCATION:
+            Fn::Sub: "https://s3.amazonaws.com/${ToolsArtifactsS3Bucket}/log-pipeline/${LogPipelineCFTVersion}/log-destination.yaml"
+          LOG_PIPELINE_CREATION_CFT_VERSION:
+            Ref: LogPipelineCFTVersion
+  RegionOnboardingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: RegionOnboardingPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - cloudformation:*
+                  - sts:AssumeRole
+                Resource: "*"
+  RegionOnboardingInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt: RegionOnboardingLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+  VPCCreationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../vpc-creation.zip
+      Description: Lambda handler which creates vpc
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-vpc-creation
+      Handler:
+        Fn::Sub: VPCCreationLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: VPCCreationLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          VPC_STACKSET:
+            Ref: VPCStackset
+          REGION_ONBOARDING_STACKSET:
+            Ref: RegionOnboardingStackset
+            
+  VPCDeletionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../vpc-deletion.zip
+      Description: Lambda handler which deletes the default vpc in all the regions in the account.
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-default-vpc-deletion
+      Handler:
+        Fn::Sub: DefaultVPCDeletionLambdaHandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: VPCCreationLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+  
+      
+  VPCCreationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: RegionOnboardingPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - cloudformation:*
+                  - sts:AssumeRole
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeRegions
+                  - lambda:InvokeFunction
+                Resource: "*"
+  
+  VPCCreationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt: VPCCreationLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+  
+  BudgetCreationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-budget-billing-enabler
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+      
+  BillingInvoiceInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-billing-invoice-generator
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+        
+  ServiceCatalogInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-servicecatalog-deployer
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+        
+  DirectConnectCreationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-cloudshell-direct-connect-apigateway-mgr
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+        
+  AccountOnboardingInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentStage}-pac-account-onboarding
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AccountCreationAPI}/*/*/*
+        
+  AccountCreationNotifierLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../account-creation-notifier.zip
+      Description: Lambda handler which enables CT,Config via cloud formation
+      FunctionName:
+        Fn::Sub: ${DeploymentStage}-pac-account-creation-notifier
+      Handler:
+        Fn::Sub: AccountCreationNotifierLambdahandler.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt: AccountCreationNotifierLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          DEVOPS_ARTIFACT_BUCKET:
+            Ref: ToolsArtifactsS3Bucket
+          ACCOUNTS_TABLE:
+            Ref: AccountsTable
+          NOTIFICATION_TOPIC:
+            Ref: AccountCreationNotificationTopic
+          NOTIFICATION_EMAIL_TOPIC:
+            Ref: AccountCreationEmailNotificationTopic            
+  AccountCreationNotifierLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path:
+        Fn::Sub: /lambda-exec-roles/account-creation/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: AccountCreationPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*"
+              -
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource: "*"
+              -
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: "*"
+  AccountCreationNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: ${DeploymentStage}-pac-account-creation-notification-topic
+  AccountCreationEmailNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: ${DeploymentStage}-pac-account-creation-email-notification-topic
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref AccountCreationNotificationEmail
+      Protocol: email
+      TopicArn: !Ref AccountCreationEmailNotificationTopic
+  AccountsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: ${DeploymentStage}-pac-accounts
+      AttributeDefinitions:
+        -
+          AttributeName: requestId
+          AttributeType: S
+      KeySchema:
+        -
+          AttributeName: requestId
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+Outputs:
+  AccountCreationAPIEndpointURL:
+    Description: >-
+      Public API for creating AWS Account
+    Value:
+      Fn::Sub: https://${AccountCreationAPI}.execute-api.${AWS::Region}.amazonaws.com/${APIStage}
+  AccountCreationAPIKey:
+    Description: >-
+      Public API key value to access API
+    Value:
+      Ref: ApiKey
+  

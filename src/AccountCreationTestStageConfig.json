@@ -1,0 +1,19 @@
+{
+	"Parameters" : {
+		"ToolsArtifactsS3Bucket": "accountcreationcodepipelineartifactbucke-s3bucket-1vdnd6zu16ecx",
+		"LogPipelineCFTVersion": "v7",
+		"AccountOnboardingCFTVersion": "v106",
+		"RegionOnboardingCFTVersion":"v11",
+		"LoggingAccountId":"665901945220",
+		"CommonTemplateVersion":"v1",
+		"CostCenter":"NA",
+		"LoggingAccountTrustRoleArn": "arn:aws:iam::665901945220:role/pac-devops-role",
+		"MasterAccountRoleArn": "arn:aws:iam::249664305900:role/pac-org-admin",
+		"MasterAccountRoleExternalId": "197791279511",
+		"AccountCreationNotificationEmail": "madhu.c@8kmiles.com",
+		"AccountCreationApproverEmail": "saravanan.b@8kmiles.com",
+		"AccountCreationFromEmail": "saravanan.b@8kmiles.com",
+		"TestAccountId":"208777866582",
+		"AllowAWSAccountCreation":"false"
+	}
+}
