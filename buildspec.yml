@@ -6,8 +6,8 @@ phases:
       - apt-get update
       - apt-get install zip
       - apt-get install python
-      - apt-get install python-pip
-      - apt-get install awscli 
+      - apt-get -y install python-pip
+      - apt-get -y install awscli
   pre_build:
     commands:
       - echo "Started building the package"
